@@ -1,0 +1,569 @@
+DROP DATABASE IF EXISTS ECOMMERCE;
+CREATE DATABASE ECOMMERCE;
+USE ECOMMERCE;
+
+
+
+CREATE TABLE cliente (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    nome VARCHAR(100) NOT NULL,
+    idade SMALLINT NOT NULL,
+    sexo CHAR(1) NOT NULL CHECK(sexo IN ('F', 'M', 'O')),
+    nascimento DATE NOT NULL
+);
+
+CREATE TABLE cliente_especial (
+    id_cliente INT PRIMARY KEY,
+    cashback DECIMAL(10, 2),
+    FOREIGN KEY (id_cliente) REFERENCES cliente(id)
+);
+
+CREATE TABLE vendedor (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    nome VARCHAR(100) NOT NULL,
+    causa_social VARCHAR(50) UNIQUE NOT NULL,
+    tipo VARCHAR(50) NOT NULL,
+    salario DECIMAL(10, 2),
+    media DECIMAL(3, 2)
+);
+
+CREATE TABLE funcionario_especial (
+    id_vendedor INT PRIMARY KEY,
+    bonus DECIMAL(10, 2) NOT NULL,
+    FOREIGN KEY (id_vendedor) REFERENCES vendedor(id)
+);
+
+CREATE TABLE usuario (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    login VARCHAR(50) NOT NULL,
+    senha VARCHAR(50) NOT NULL,
+    cargo VARCHAR(20) NOT NULL CHECK(cargo IN('vendedor', 'gerente', 'CEO'))
+);
+
+CREATE TABLE produto (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    nome VARCHAR(100) NOT NULL,
+    descricao VARCHAR(100) NOT NULL,
+    estoque INT,
+    valor DECIMAL(10,2) NOT NULL,
+    observacoes VARCHAR(100),
+    id_vendedor INT NOT NULL,
+    FOREIGN KEY (id_vendedor) REFERENCES vendedor(id)
+);
+
+CREATE TABLE transportadora (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    nome VARCHAR(100) NOT NULL,
+    cidade VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE venda (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    id_transportadora INT,
+    id_cliente INT,
+    id_vendedor INT,
+    destino VARCHAR(50) NOT NULL,
+    data DATE NOT NULL,
+    hora TIME NOT NULL,
+    frete DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (id_transportadora) REFERENCES transportadora(id),
+    FOREIGN KEY (id_cliente) REFERENCES cliente(id),
+    FOREIGN KEY (id_vendedor) REFERENCES vendedor(id)
+);
+
+CREATE TABLE item_venda (
+    id_venda INT,
+    id_produto INT,
+    quantidade INT NOT NULL,
+    PRIMARY KEY (id_venda, id_produto),
+    FOREIGN KEY (id_venda) REFERENCES venda(id),
+    FOREIGN KEY (id_produto) REFERENCES produto(id)
+);
+
+CREATE TABLE log_mensagens (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    mensagem TEXT NOT NULL,
+    data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+DROP USER IF EXISTS 'CEO_Ecom'@'%';
+DROP USER IF EXISTS 'GER_Ecom'@'%';
+DROP USER IF EXISTS 'FUN_Ecom'@'%';
+
+CREATE USER 'CEO_Ecom'@'%' IDENTIFIED BY 'Senha_CEO';
+GRANT ALL PRIVILEGES ON ecommerce.* TO 'CEO_Ecom'@'%' WITH GRANT OPTION;
+
+CREATE USER 'GER_Ecom'@'%' IDENTIFIED BY 'Senha_GER';
+GRANT SELECT, UPDATE, DELETE ON ecommerce.* TO 'GER_Ecom'@'%';
+
+CREATE USER 'FUN_Ecom'@'%' IDENTIFIED BY 'Senha_FUN';
+GRANT SELECT, INSERT ON venda TO 'FUN_Ecom'@'%';
+GRANT SELECT, INSERT ON item_venda TO 'FUN_Ecom'@'%';
+
+FLUSH PRIVILEGES;
+
+DELIMITER $$
+CREATE FUNCTION calcular_idade(
+    aux_id INT
+) RETURNS INT
+DETERMINISTIC
+BEGIN 
+    DECLARE aux_idade INT;
+    DECLARE aux_nascimento DATE;
+    
+    SELECT nascimento INTO aux_nascimento 
+    FROM cliente 
+    WHERE id = aux_id;
+    
+    SET aux_idade = TIMESTAMPDIFF(YEAR, aux_nascimento, CURDATE());
+    
+    RETURN aux_idade;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE FUNCTION soma_fretes(
+    p_destino VARCHAR(100)
+) RETURNS DECIMAL(10,2)
+DETERMINISTIC
+BEGIN
+    DECLARE total DECIMAL(10,2);
+
+    SELECT SUM(v.frete)
+    INTO total
+    FROM venda v
+    JOIN transportadora t ON v.id_transportadora = t.id
+    WHERE t.cidade = p_destino;
+
+    RETURN IFNULL(total, 0);
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE FUNCTION arrecadado(
+    aux_data DATE, 
+    aux_id_vendedor INT
+) RETURNS DECIMAL(10,2)
+DETERMINISTIC
+BEGIN
+    DECLARE total DECIMAL(10,2);
+
+    SELECT SUM(p.valor * iv.quantidade)
+    INTO total
+    FROM venda v
+    JOIN item_venda iv ON v.id = iv.id_venda
+    JOIN produto p ON iv.id_produto = p.id
+    WHERE v.id_vendedor = aux_id_vendedor
+      AND v.data = aux_data;
+
+    RETURN IFNULL(total, 0);
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE TRIGGER trg_vendedor_funcionario_especial
+AFTER INSERT ON item_venda
+FOR EACH ROW
+BEGIN
+    DECLARE total_vendido DECIMAL(10,2);
+    DECLARE bonus_valor DECIMAL(10,2);
+    DECLARE total_bonus DECIMAL(10,2);
+    DECLARE id_vend INT;
+    DECLARE mensagem_log TEXT;
+
+    SELECT id_vendedor INTO id_vend
+    FROM venda
+    WHERE id = NEW.id_venda;
+
+    SELECT SUM(p.valor * iv.quantidade)
+    INTO total_vendido
+    FROM venda v
+    JOIN item_venda iv ON v.id = iv.id_venda
+    JOIN produto p ON iv.id_produto = p.id
+    WHERE v.id_vendedor = id_vend;
+
+    IF total_vendido > 1000 THEN
+        SET bonus_valor = total_vendido * 0.05;
+
+        INSERT INTO funcionario_especial (id_vendedor, bonus)
+        VALUES (id_vend, bonus_valor)
+        ON DUPLICATE KEY UPDATE bonus = VALUES(bonus);
+
+        SELECT SUM(bonus) INTO total_bonus
+        FROM funcionario_especial;
+
+        SET mensagem_log = CONCAT('Total de bônus salarial necessário: R$ ', IFNULL(total_bonus, 0));
+        INSERT INTO log_mensagens (mensagem) VALUES (mensagem_log);
+    END IF;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE TRIGGER trg_cliente_especial
+AFTER INSERT ON item_venda
+FOR EACH ROW
+BEGIN
+    DECLARE total_gasto DECIMAL(10,2);
+    DECLARE cashback_valor DECIMAL(10,2);
+    DECLARE total_cashback DECIMAL(10,2);
+    DECLARE id_cli INT;
+    DECLARE mensagem_log TEXT;
+
+    SELECT id_cliente INTO id_cli
+    FROM venda
+    WHERE id = NEW.id_venda;
+
+    SELECT SUM(p.valor * iv.quantidade)
+    INTO total_gasto
+    FROM venda v
+    JOIN item_venda iv ON v.id = iv.id_venda
+    JOIN produto p ON iv.id_produto = p.id
+    WHERE v.id_cliente = id_cli;
+
+    IF total_gasto > 500 THEN
+        SET cashback_valor = total_gasto * 0.02;
+
+        INSERT INTO cliente_especial (id_cliente, cashback)
+        VALUES (id_cli, cashback_valor)
+        ON DUPLICATE KEY UPDATE cashback = VALUES(cashback);
+
+        SELECT SUM(cashback) INTO total_cashback
+        FROM cliente_especial;
+
+        SET mensagem_log = CONCAT('Valor necessário para lidar com todo cashback: R$ ', IFNULL(total_cashback, 0));
+        INSERT INTO log_mensagens (mensagem) VALUES (mensagem_log);
+    END IF;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE TRIGGER trg_remove_cliente_especial
+AFTER UPDATE ON cliente_especial
+FOR EACH ROW
+BEGIN
+    IF NEW.cashback <= 0 THEN
+        DELETE FROM cliente_especial
+        WHERE id_cliente = NEW.id_cliente;
+    END IF;
+END$$
+DELIMITER ;
+
+CREATE OR REPLACE VIEW view_vendas_vendedor AS
+SELECT 
+    vendedor.id AS id_vendedor,
+    vendedor.nome AS nome_vendedor,
+    SUM(produto.valor * item_venda.quantidade) AS total_vendas,
+    COUNT(DISTINCT venda.id) AS total_transacoes
+FROM venda
+JOIN vendedor ON venda.id_vendedor = vendedor.id
+JOIN item_venda ON venda.id = item_venda.id_venda
+JOIN produto ON item_venda.id_produto = produto.id
+GROUP BY vendedor.id, vendedor.nome;
+
+CREATE OR REPLACE VIEW view_clientes_especiais AS
+SELECT 
+    cliente.id AS id_cliente,
+    cliente.nome,
+    cliente_especial.cashback,
+    COUNT(DISTINCT venda.id) AS total_compras
+FROM cliente
+JOIN cliente_especial ON cliente.id = cliente_especial.id_cliente
+LEFT JOIN venda ON cliente.id = venda.id_cliente
+GROUP BY cliente.id, cliente.nome, cliente_especial.cashback;
+
+CREATE OR REPLACE VIEW view_produtos_vendidos AS
+SELECT 
+    produto.id AS id_produto,
+    produto.nome AS nome_produto,
+    vendedor.nome AS nome_vendedor,
+    SUM(item_venda.quantidade) AS quantidade_vendida,
+    SUM(item_venda.quantidade * produto.valor) AS valor_total
+FROM produto
+JOIN item_venda ON produto.id = item_venda.id_produto
+JOIN vendedor ON produto.id_vendedor = vendedor.id
+GROUP BY produto.id, produto.nome, vendedor.nome;
+
+DELIMITER $$
+CREATE PROCEDURE reajuste(
+    IN p_percentual DECIMAL(5,2), 
+    IN p_categoria VARCHAR(50)
+)
+BEGIN
+    UPDATE vendedor
+    SET salario = salario + (salario * (p_percentual / 100))
+    WHERE tipo = p_categoria;
+
+    SELECT CONCAT('Reajuste de ', p_percentual, '% aplicado à categoria ', p_categoria) AS mensagem;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE sorteio()
+BEGIN
+    DECLARE v_id_cliente INT;
+    DECLARE v_cashback DECIMAL(10,2);
+    DECLARE v_premio DECIMAL(10,2);
+
+    SELECT id INTO v_id_cliente
+    FROM cliente
+    ORDER BY RAND()
+    LIMIT 1;
+
+    SELECT cashback INTO v_cashback
+    FROM cliente_especial
+    WHERE id_cliente = v_id_cliente;
+
+    IF v_cashback IS NULL THEN
+        SET v_premio = 100.00;
+    ELSE
+        SET v_premio = 200.00;
+    END IF;
+
+    SELECT c.nome AS Cliente_Sorteado, v_premio AS Valor_Premio
+    FROM cliente c
+    WHERE c.id = v_id_cliente;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE venda(IN p_id_venda INT)
+BEGIN
+    UPDATE produto AS p
+    JOIN item_venda AS iv ON p.id = iv.id_produto
+    SET p.estoque = p.estoque - iv.quantidade
+    WHERE iv.id_venda = p_id_venda;
+    
+    SELECT CONCAT('Venda ', p_id_venda, ' registrada e estoque atualizado.') AS mensagem;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE estatisticas()
+BEGIN
+    DECLARE v_produto_mais INT;
+    DECLARE v_produto_menos INT;
+    
+    SELECT id_produto INTO v_produto_mais
+    FROM item_venda
+    GROUP BY id_produto
+    ORDER BY SUM(quantidade) DESC
+    LIMIT 1;
+    
+    SELECT id_produto INTO v_produto_menos
+    FROM item_venda
+    GROUP BY id_produto
+    ORDER BY SUM(quantidade) ASC
+    LIMIT 1;
+    
+    SELECT  
+        'Produto mais vendido' AS tipo,
+        p.nome AS produto,
+        SUM(iv.quantidade) AS total_vendido,
+        vdr.nome AS vendedor,
+        SUM(iv.quantidade * p.valor) AS valor_ganho,
+        (SELECT DATE_FORMAT(v2.data, '%Y-%m') 
+         FROM venda v2 
+         JOIN item_venda iv2 ON v2.id = iv2.id_venda 
+         WHERE iv2.id_produto = v_produto_mais 
+         GROUP BY DATE_FORMAT(v2.data, '%Y-%m') 
+         ORDER BY COUNT(*) DESC 
+         LIMIT 1) AS mes_maior_vendas,
+        (SELECT DATE_FORMAT(v2.data, '%Y-%m') 
+         FROM venda v2 
+         JOIN item_venda iv2 ON v2.id = iv2.id_venda 
+         WHERE iv2.id_produto = v_produto_mais 
+         GROUP BY DATE_FORMAT(v2.data, '%Y-%m') 
+         ORDER BY COUNT(*) ASC 
+         LIMIT 1) AS mes_menor_vendas
+    FROM item_venda AS iv
+    JOIN produto AS p ON iv.id_produto = p.id
+    JOIN vendedor AS vdr ON p.id_vendedor = vdr.id
+    WHERE p.id = v_produto_mais
+    GROUP BY p.id;
+    
+    SELECT  
+        'Produto menos vendido' AS tipo,
+        p.nome AS produto,
+        SUM(iv.quantidade) AS total_vendido,
+        vdr.nome AS vendedor,
+        SUM(iv.quantidade * p.valor) AS valor_ganho,
+        (SELECT DATE_FORMAT(v2.data, '%Y-%m') 
+         FROM venda v2 
+         JOIN item_venda iv2 ON v2.id = iv2.id_venda 
+         WHERE iv2.id_produto = v_produto_menos 
+         GROUP BY DATE_FORMAT(v2.data, '%Y-%m') 
+         ORDER BY COUNT(*) DESC 
+         LIMIT 1) AS mes_maior_vendas,
+        (SELECT DATE_FORMAT(v2.data, '%Y-%m') 
+         FROM venda v2 
+         JOIN item_venda iv2 ON v2.id = iv2.id_venda 
+         WHERE iv2.id_produto = v_produto_menos 
+         GROUP BY DATE_FORMAT(v2.data, '%Y-%m') 
+         ORDER BY COUNT(*) ASC 
+         LIMIT 1) AS mes_menor_vendas
+    FROM item_venda AS iv
+    JOIN produto AS p ON iv.id_produto = p.id
+    JOIN vendedor AS vdr ON p.id_vendedor = vdr.id
+    WHERE p.id = v_produto_menos
+    GROUP BY p.id;
+END$$
+DELIMITER ;
+
+INSERT INTO cliente (id, nome, idade, sexo, nascimento) VALUES
+(1, 'Lívia Moretti', 24, 'F', '2001-10-22'),
+(2, 'João Guilherme Rocha', 29, 'M', '1996-09-17'),
+(3, 'Camila Ferraz', 27, 'F', '1998-03-05'),
+(4, 'Gustavo Prado', 33, 'M', '1992-06-19'),
+(5, 'Marina Albuquerque', 25, 'F', '2000-11-03'),
+(6, 'Otávio Monteiro', 30, 'M', '1995-04-09'),
+(7, 'Rebeca Lacerda', 28, 'F', '1997-02-27'),
+(8, 'Leonardo Vilela', 35, 'M', '1990-08-15'),
+(9, 'Helena Duarte', 26, 'F', '1999-05-12'),
+(10, 'Rafael Barreto', 32, 'M', '1993-01-06'),
+(11, 'Natália Paes', 23, 'F', '2002-07-28'),
+(12, 'Caio Rezende', 34, 'M', '1989-09-10'),
+(13, 'Letícia Mourão', 22, 'F', '2003-12-04'),
+(14, 'Henrique Bastos', 36, 'M', '1988-03-30'),
+(15, 'Vitória Nogueira', 27, 'F', '1998-09-11'),
+(16, 'Fábio Lemos', 31, 'M', '1994-05-22'),
+(17, 'Amanda Castro', 28, 'F', '1997-08-03'),
+(18, 'Felipe Azevedo', 25, 'M', '2000-02-14'),
+(19, 'Clara Mendonça', 29, 'F', '1996-04-25'),
+(20, 'Arthur Neves', 33, 'M', '1992-10-08'),
+(21, 'Júlia Sampaio', 26, 'F', '1999-03-17'),
+(22, 'Diego Vasconcelos', 30, 'M', '1995-11-01'),
+(23, 'Lara Fontes', 24, 'F', '2001-06-09'),
+(24, 'Pedro Figueiredo', 27, 'M', '1998-07-02'),
+(25, 'Mirela Coutinho', 35, 'F', '1990-12-15'),
+(26, 'André Rabelo', 28, 'M', '1997-09-07'),
+(27, 'Bruna Tavares', 25, 'F', '2000-01-13'),
+(28, 'Rodrigo Carvalho', 32, 'M', '1993-02-20'),
+(29, 'Fernanda Araújo', 30, 'F', '1995-05-09'),
+(30, 'Lucas Vieira', 34, 'M', '1989-07-19'),
+(31, 'Carolina Reis', 23, 'F', '2002-11-30'),
+(32, 'Victor Martins', 29, 'M', '1996-03-04'),
+(33, 'Sabrina Campos', 27, 'F', '1998-10-14'),
+(34, 'Thiago Leal', 31, 'M', '1994-06-21'),
+(35, 'Paula Ribeiro', 25, 'F', '2000-09-28'),
+(36, 'Eduardo Correia', 28, 'M', '1997-04-11'),
+(37, 'Isabela Moraes', 26, 'F', '1999-01-26'),
+(38, 'Marcelo Pinheiro', 33, 'M', '1992-05-05'),
+(39, 'Tainá Soares', 22, 'F', '2003-08-09'),
+(40, 'Igor Matos', 30, 'M', '1995-03-23'),
+(41, 'Patrícia Brito', 29, 'F', '1996-02-01'),
+(42, 'Bruno Cardoso', 35, 'M', '1990-10-20'),
+(43, 'Larissa Barros', 27, 'F', '1998-06-18'),
+(44, 'Henrique Teixeira', 24, 'M', '2001-12-07'),
+(45, 'Renata Oliveira', 28, 'F', '1997-04-15'),
+(46, 'Caio Nascimento', 32, 'M', '1993-09-01'),
+(47, 'Tatiane Peixoto', 30, 'F', '1995-07-30'),
+(48, 'Daniel Costa', 25, 'M', '2000-10-19'),
+(49, 'Aline Rocha', 26, 'F', '1999-03-08'),
+(50, 'Murilo Gonçalves', 31, 'M', '1994-02-16'),
+(51, 'Juliana Pires', 34, 'F', '1989-12-09'),
+(52, 'Ricardo Melo', 28, 'M', '1997-01-25'),
+(53, 'Marina Duarte', 22, 'F', '2003-09-22'),
+(54, 'Vitor Silva', 36, 'M', '1988-06-14'),
+(55, 'Amanda Lima', 25, 'F', '2000-11-05'),
+(56, 'Hugo Fernandes', 27, 'M', '1998-02-18'),
+(57, 'Isis Freitas', 30, 'F', '1995-09-27'),
+(58, 'Alex Costa', 29, 'M', '1996-08-08'),
+(59, 'Rafaela Borges', 26, 'F', '1999-10-02'),
+(60, 'Leandro Souza', 33, 'M', '1992-04-13'),
+(61, 'Camila Moreira', 21, 'F', '2004-03-19'),
+(62, 'Renan Queiroz', 35, 'M', '1990-05-29'),
+(63, 'Beatriz Mota', 23, 'F', '2002-01-04'),
+(64, 'Eduardo Ramos', 27, 'M', '1998-09-17'),
+(65, 'Larissa Nunes', 24, 'F', '2001-06-02'),
+(66, 'Felipe Correia', 31, 'M', '1994-08-26'),
+(67, 'Clara Albuquerque', 28, 'F', '1997-03-15'),
+(68, 'Ruan Barata', 32, 'M', '1993-12-11'),
+(69, 'Sophie Neves', 22, 'F', '2003-07-01'),
+(70, 'Rômulo Farias', 34, 'M', '1989-11-07'),
+(71, 'Bianca Andrade', 26, 'F', '1999-02-23'),
+(72, 'Caíque Pacheco', 29, 'M', '1996-05-30'),
+(73, 'Érica Carvalho', 33, 'F', '1992-08-17'),
+(74, 'Mateus Diniz', 24, 'M', '2001-03-06'),
+(75, 'Laura Mendonça', 27, 'F', '1998-06-14'),
+(76, 'Anderson Reis', 30, 'M', '1995-09-25'),
+(77, 'Gabriela Teles', 25, 'F', '2000-12-12'),
+(78, 'Jonas Oliveira', 28, 'M', '1997-01-20'),
+(79, 'Nicole Santana', 23, 'F', '2002-02-09'),
+(80, 'Tiago Castro', 35, 'M', '1990-03-31'),
+(81, 'Catarina Duarte', 21, 'F', '2004-05-21'),
+(82, 'Rogério Almeida', 33, 'M', '1992-02-19'),
+(83, 'Letícia Campos', 29, 'F', '1996-11-16'),
+(84, 'Fernando Lopes', 31, 'M', '1994-04-04'),
+(85, 'Patrícia Vidal', 27, 'F', '1998-01-10'),
+(86, 'Hélio Batista', 36, 'M', '1989-08-06'),
+(87, 'Luna Carvalho', 22, 'F', '2003-09-03'),
+(88, 'Vinícius Figueira', 28, 'M', '1997-05-29'),
+(89, 'Mariana Correia', 25, 'F', '2000-10-01'),
+(90, 'Daniel Barros', 32, 'M', '1993-07-11'),
+(91, 'Tatiane Moraes', 26, 'F', '1999-12-09'),
+(92, 'Henrique Silva', 30, 'M', '1995-02-03'),
+(93, 'Rafaela Fonseca', 27, 'F', '1998-09-22'),
+(94, 'Diogo Viana', 34, 'M', '1989-01-27'),
+(95, 'Melissa Rocha', 24, 'F', '2001-04-16'),
+(96, 'Carlos Meireles', 35, 'M', '1990-10-24'),
+(97, 'Isabela Tavares', 23, 'F', '2002-07-28'),
+(98, 'Rodrigo Brito', 31, 'M', '1994-05-09'),
+(99, 'Ana Clara Freire', 22, 'F', '2003-08-18'),
+(100, 'Paulo Henrique', 28, 'M', '1997-09-25');
+
+
+
+
+
+
+-- Inserção de vendedores (5 vendedores de jogos)
+INSERT INTO vendedor (nome, causa_social, tipo, salario, media)
+VALUES 
+('André', 'GameWorld Ltda', 'Consoles e Acessórios', 3200.00, 4.7),
+('Mariana', 'PixelPlay Ltda', 'Jogos Digitais e Mídias Físicas', 3100.00, 4.8),
+('Felipe', 'NextGen Gaming Ltda', 'PC Gamer e Periféricos', 3500.00, 4.6),
+('Camila', 'RetroFun Ltda', 'Jogos Retrô e Colecionáveis', 2800.00, 4.5),
+('Lucas', 'XPBoost Ltda', 'DLCs e Expansões de Jogos', 2900.00, 4.4);
+
+
+-- Inserção de produtos (20 produtos de jogos)
+
+INSERT INTO produto (nome, descricao, estoque, valor, observacoes, id_vendedor)
+VALUES
+-- Vendedor 1 - Consoles e Acessórios
+('PlayStation 5', 'Console Sony com SSD ultrarrápido e controle DualSense', 15, 4500.00, 'Garantia de 12 meses', 1),
+('Controle DualSense PS5', 'Controle oficial com feedback háptico e gatilhos adaptáveis', 30, 450.00, '', 1),
+('Xbox Series X', 'Console Microsoft 1TB com 4K nativo', 10, 4300.00, 'Edição 2025', 1),
+('Headset Pulse 3D', 'Fone oficial compatível com PS5 e PC', 20, 600.00, '', 1),
+
+-- Vendedor 2 - Jogos Digitais e Mídias Físicas
+('God of War: Ragnarök', 'Jogo de ação e aventura exclusivo para PlayStation', 40, 350.00, 'Versão física', 2),
+('The Legend of Zelda: Tears of the Kingdom', 'Nova aventura épica para Nintendo Switch', 35, 380.00, 'Edição limitada', 2),
+('Elden Ring', 'RPG de ação em mundo aberto', 50, 320.00, 'Inclui mapa e pôster', 2),
+('Hogwarts Legacy', 'Aventura no universo de Harry Potter', 45, 340.00, '', 2),
+
+-- Vendedor 3 - PC Gamer e Periféricos
+('Teclado Mecânico Redragon Kumara', 'Teclado ABNT2 com switches Outemu Blue', 60, 250.00, 'LED RGB', 3),
+('Mouse Gamer Logitech G502 Hero', 'Sensor HERO 25K DPI, 11 botões programáveis', 55, 420.00, 'Cabo trançado', 3),
+('Cadeira Gamer ThunderX3 TGC12', 'Cadeira ergonômica com ajuste de altura e reclinação', 25, 1600.00, 'Couro sintético', 3),
+('Monitor AOC 27G2', 'Monitor 27" 144Hz, 1ms, painel IPS', 20, 1300.00, '', 3),
+
+-- Vendedor 4 - Jogos Retrô e Colecionáveis
+('Nintendo Game Boy Color', 'Console portátil clássico da Nintendo', 10, 700.00, 'Recondicionado', 4),
+('Super Mario World (SNES)', 'Cartucho original com caixa', 15, 450.00, 'Edição de colecionador', 4),
+('Sonic the Hedgehog (Mega Drive)', 'Cartucho original Sega 16-bit', 12, 400.00, '', 4),
+('Pac-Man Arcade Mini', 'Mini arcade colecionável com som e luzes', 25, 380.00, '', 4),
+
+-- Vendedor 5 - DLCs e Expansões
+('Elden Ring: Shadow of the Erdtree', 'Expansão com novas áreas, chefes e armas lendárias', 40, 180.00, 'Pré-venda disponível', 5),
+('Cyberpunk 2077: Phantom Liberty', 'Expansão com novas missões e final alternativo', 35, 200.00, 'Compatível com PS5, PC e Xbox Series', 5),
+('The Witcher 3: Blood and Wine', 'Expansão ambientada em Toussaint, com 30h de conteúdo extra', 30, 160.00, '', 5),
+('Assassin’s Creed Valhalla: Dawn of Ragnarök', 'Nova história mitológica com poderes dos deuses nórdicos', 25, 190.00, '', 5),
+('Horizon Forbidden West: Burning Shores', 'Continuação direta com mapa expandido e novos inimigos', 30, 210.00, '', 5);
+
+INSERT INTO transportadora (nome, cidade) VALUES
+('TechExpress', 'São Paulo'),
+('GamerLog', 'Rio de Janeiro'),
+('FastDelivery', 'Belo Horizonte'),
+('Overclock Transportes', 'Curitiba'),
+('RGB Express', 'Recife');
